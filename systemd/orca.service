@@ -1,0 +1,19 @@
+[Unit]
+Description=Orca Remote Server (orca serve, headless)
+Documentation=https://github.com/stablyai/orca
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=orca
+Group=orca
+WorkingDirectory=/var/lib/orca
+Environment=HOME=/var/lib/orca
+Environment=ORCA_SERVE_PORT=6768
+ExecStart=/usr/local/bin/orca serve --port 6768 --pairing-address __CT_IP__
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
