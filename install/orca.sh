@@ -215,7 +215,8 @@ pct exec "$CT_ID" -- bash -c '
   apt-get update
   apt-get install -y curl ca-certificates git squashfs-tools procps iproute2 \
     libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
-    libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2 libpango-1.0-0 libcairo2
+    libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2 libpango-1.0-0 libcairo2 \
+    libgtk-3-0 libxfixes3
   id orca >/dev/null 2>&1 || useradd -m -s /bin/bash orca
   mkdir -p /opt/orca /var/lib/orca
   chown orca:orca /opt/orca /var/lib/orca
@@ -252,12 +253,24 @@ else
     chmod +x orca-linux.AppImage
     rm -rf squashfs-root
     ./orca-linux.AppImage --appimage-extract >/dev/null
+    chmod +x squashfs-root/AppRun 2>/dev/null || true
     ls squashfs-root | head -n 30
-    BIN="$(find squashfs-root -maxdepth 3 -type f -name orca | head -n1)"
+    BIN=""
+    DESK="$(ls squashfs-root/*.desktop 2>/dev/null | head -n1 || true)"
+    if [ -n "$DESK" ]; then
+      EXECLINE="$(grep -m1 ^Exec= "$DESK" | cut -d= -f2- || true)"
+      CAND="${EXECLINE%% *}"
+      if [ -n "$CAND" ] && [ -x "squashfs-root/$CAND" ]; then BIN="squashfs-root/$CAND"; fi
+    fi
+    if [ -z "$BIN" ]; then
+      for CAND in squashfs-root/AppRun squashfs-root/orca-ide squashfs-root/orca squashfs-root/usr/bin/orca squashfs-root/usr/bin/orca-ide; do
+        if [ -x "$CAND" ]; then BIN="$CAND"; break; fi
+      done
+    fi
     test -n "$BIN"
-    echo "Orca-Binary: $BIN"
+    echo "Orca-Entry: $BIN (Desktop: ${DESK:-keine})"
     ln -sf "/opt/orca/${BIN}" /usr/local/bin/orca
-    /usr/local/bin/orca --version || /usr/local/bin/orca status --json || true
+    su -s /bin/bash orca -c "/usr/local/bin/orca --version" || su -s /bin/bash orca -c "/usr/local/bin/orca status --json" || true
   '
 fi
 # Hinweis: bewusst kein '| tail' hier – mit pipefail wuerde der trap sonst
