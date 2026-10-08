@@ -27,9 +27,9 @@ bash orca.sh --source-build  # Fallback: aus Source bauen statt Prebuilt (30-60 
 |---|---|
 | App-Name / Hostname | `orca` |
 | Zweck | Orca ADE als always-on Remote-Server – parallele Coding-Agenten (Claude Code, Codex, OpenCode …), per Laptop-Orca / Browser / Mobile pairbar |
-| Tech-Stack | Prebuilt `orca-linux.AppImage` (`--appimage-extract`, ohne FUSE) + systemd `orca serve :6768`, User `orca`, `/opt/orca`, `/var/lib/orca` |
+| Tech-Stack | Prebuilt `orca-linux.AppImage` (`--appimage-extract`, ohne FUSE) + `xvfb` + systemd `orca serve :6768`, User `orca`, `/opt/orca`, `/var/lib/orca` |
 | GitHub-Repo (Upstream) | `https://github.com/stablyai/orca` |
-| Endpoint | `http://<LXC-IP>:6768` (Pairing-URL aus `journalctl -u orca`) |
+| Endpoint | `http://<LXC-IP>:6768`, Web-Client `http://<LXC-IP>:6768/web-index.html` (HTTP 200), Pairing-URL aus `journalctl -u orca` |
 | Standard-Ressourcen | 2 vCPU / 4096 MB RAM / 20 GB Disk (Electron-Prebuilt + Extract brauchen mehr als 1–2 GB / 4–8 GB) |
 | CT-ID | immer die **nächste freie ID** (`pvesh get /cluster/nextid`), außer `--ctid` gesetzt |
 | Template | `debian-12-standard` (neuestes auf Storage `local`) |
@@ -39,25 +39,31 @@ Das Skript (`set -euo pipefail`, idempotent, `trap ERR` mit Befehl+Zeile+Exit-Co
 1. prüft Host/Tools, nimmt die nächste freie CT-ID, erkennt RootFS-Storage
    (bevorzugt `local-lvm`), lädt das neueste `debian-12-standard`-Template falls nötig,
 2. erstellt den LXC `orca` (`onboot: 1`, unprivilegiert),
-3. installiert im Container Deps + Electron-Libs, legt User `orca` an,
+3. installiert im Container Deps + Electron-Libs (`libgtk-3-0`, `libxfixes3`, …) + `xvfb`,
+   legt User `orca` an,
    lädt das neueste Orca-Release (GitHub-API, Fallback `/releases/latest`-Redirect),
-   extrahiert per `--appimage-extract` nach `/opt/orca`, verlinkt `/usr/local/bin/orca`,
-   schreibt `orca.service` (Pairing-Adresse = Container-IP), `systemctl enable --now orca`,
-4. verifiziert `systemctl is-active orca` + HTTP auf `localhost:6768/`
-   (**jeder Status außer 000 zählt**, da `/` nicht garantiert 200 liefert)
-   und gibt Endpoint + Pairing-Link + Container-IP aus.
+   extrahiert per `--appimage-extract` nach `/opt/orca`, nimmt als Entry den
+   gebündelten Dispatcher (`resources/bin/orca-ide`, braucht kein Display;
+   Fallback: `AppRun` aus `.desktop`-Exec unter `xvfb-run`),
+   verlinkt `/usr/local/bin/orca`, schreibt den Starter `/usr/local/bin/orca-serve`
+   (Entry + Pairing-Adresse) und die statische `orca.service`,
+   `systemctl enable --now orca`,
+4. verifiziert `systemctl is-active orca` + HTTP 200 auf `localhost:6768/web-index.html`
+   (Fallback: jede Antwort auf `localhost:6768/` außer 000)
+   und gibt Endpoint + Web-Client + Pairing-Link + Container-IP aus.
 
 Erwartete Schlussausgabe (Beispiel):
 
 ```text
 [OK]    Service läuft (systemctl is-active orca = active).
-[OK]    orca serve antwortet (HTTP 200 auf localhost:6768).
+[OK]    Web-Client antwortet (HTTP 200 auf localhost:6768/web-index.html).
 
 ════════ INSTALLATION ERFOLGREICH ════════════════
   App          : Orca – ADE Remote Server (orca serve, headless)
   Container    : CT 100 (Hostname: orca, unprivilegiert, onboot=1)
   Ressourcen   : 2 vCPU / 4096 MB RAM / 20 GB Disk
   Endpoint     : http://192.168.1.100:6768
+  Web-Client   : http://192.168.1.100:6768/web-index.html
   Pairing      : orca://pair?code=...
   ...
   Log          : /tmp/orca-install-2026-....log
@@ -89,9 +95,10 @@ pct stop 100 && pct destroy 100  # Deinstall
 - Jeder Fehler gibt Befehl + Zeile + Exit-Code aus, Voll-Log unter `/tmp/orca-install-*.log`.
 - `bash orca.sh --debug` für `bash -x`-Trace.
 - Im Container: `systemctl status orca --no-pager`, `journalctl -u orca -n 100`, `ss -ltn`, `ls /opt/orca/squashfs-root` (AppImage-Layout prüfen).
-- Hinweis DHCP: Die Unit enthält die Container-IP als `--pairing-address`. Bekommt der CT nach einem Reboot eine neue IP, Skript erneut laufen lassen (Update-Modus schreibt die Unit neu + Restart).
+- Hinweis DHCP: Der Starter `/usr/local/bin/orca-serve` enthält die Container-IP als `--pairing-address`. Bekommt der CT nach einem Reboot eine neue IP, Skript erneut laufen lassen (Update-Modus schreibt Starter + Unit neu + Restart).
+- Hinweis Display: `orca serve` braucht einen Display-Server – der Installer nutzt den gebündelten Dispatcher (display-los) bzw. `xvfb-run` als Fallback. `xvfb` wird immer mitinstalliert.
 
 ## Dateien
 
 - `install/orca.sh` – Proxmox-Einzeiler (Host, root).
-- `systemd/orca.service` – Unit (`:6768`, `After=network-online.target`, `Restart=always`; `__CT_IP__` wird beim Installieren ersetzt).
+- `systemd/orca.service` – Unit (statisch, `After=network-online.target`, `Restart=always`; startet `/usr/local/bin/orca-serve`, den der Installer generiert).

@@ -216,7 +216,7 @@ pct exec "$CT_ID" -- bash -c '
   apt-get install -y curl ca-certificates git squashfs-tools procps iproute2 \
     libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
     libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2 libpango-1.0-0 libcairo2 \
-    libgtk-3-0 libxfixes3
+    libgtk-3-0 libxfixes3 xvfb
   id orca >/dev/null 2>&1 || useradd -m -s /bin/bash orca
   mkdir -p /opt/orca /var/lib/orca
   chown orca:orca /opt/orca /var/lib/orca
@@ -256,11 +256,18 @@ else
     chmod +x squashfs-root/AppRun 2>/dev/null || true
     ls squashfs-root | head -n 30
     BIN=""
-    DESK="$(ls squashfs-root/*.desktop 2>/dev/null | head -n1 || true)"
-    if [ -n "$DESK" ]; then
-      EXECLINE="$(grep -m1 ^Exec= "$DESK" | cut -d= -f2- || true)"
-      CAND="${EXECLINE%% *}"
-      if [ -n "$CAND" ] && [ -x "squashfs-root/$CAND" ]; then BIN="squashfs-root/$CAND"; fi
+    MODE="direct"
+    for CAND in squashfs-root/resources/bin/orca-ide squashfs-root/resources/bin/orca; do
+      if [ -x "$CAND" ]; then BIN="$CAND"; break; fi
+    done
+    if [ -z "$BIN" ]; then
+      MODE="xvfb"
+      DESK="$(ls squashfs-root/*.desktop 2>/dev/null | head -n1 || true)"
+      if [ -n "$DESK" ]; then
+        EXECLINE="$(grep -m1 ^Exec= "$DESK" | cut -d= -f2- || true)"
+        CAND="${EXECLINE%% *}"
+        if [ -n "$CAND" ] && [ -x "squashfs-root/$CAND" ]; then BIN="squashfs-root/$CAND"; fi
+      fi
     fi
     if [ -z "$BIN" ]; then
       for CAND in squashfs-root/AppRun squashfs-root/orca-ide squashfs-root/orca squashfs-root/usr/bin/orca squashfs-root/usr/bin/orca-ide; do
@@ -268,7 +275,8 @@ else
       done
     fi
     test -n "$BIN"
-    echo "Orca-Entry: $BIN (Desktop: ${DESK:-keine})"
+    echo "Orca-Entry: $BIN (Modus: $MODE)"
+    echo "$MODE" > /opt/orca/.entry-mode
     ln -sf "/opt/orca/${BIN}" /usr/local/bin/orca
     su -s /bin/bash orca -c "/usr/local/bin/orca --version" || su -s /bin/bash orca -c "/usr/local/bin/orca status --json" || true
   '
@@ -282,12 +290,30 @@ pct exec "$CT_ID" -- test -x /usr/local/bin/orca \
   || { msg_error "Orca-Binary fehlt: /usr/local/bin/orca nicht ausfuehrbar (AppImage-Layout pruefen)."; pct exec "$CT_ID" -- ls -la /opt/orca/squashfs-root 2>/dev/null || true; exit 1; }
 msg_ok "Orca-Binary ok (/usr/local/bin/orca)."
 
-# systemd-Unit aus diesem Repo übernehmen (fällt auf Inline-Unit zurück)
+# Starter-Wrapper: Entry-Modus (direct = Dispatcher, xvfb = AppRun-Entry)
+# + feste Pairing-Adresse liegen hier – bei DHCP-Wechsel Skript erneut laufen
+# lassen (Update-Modus schreibt Wrapper + Unit neu und startet neu).
+ENTRY_MODE="$(pct exec "$CT_ID" -- cat /opt/orca/.entry-mode 2>/dev/null || echo xvfb)"
+ENTRY_MODE="${ENTRY_MODE:-xvfb}"
+msg_info "Start-Modus: $ENTRY_MODE"
+if [[ "$ENTRY_MODE" == "direct" ]]; then
+  SERVE_CMD="/usr/local/bin/orca serve --port ${APP_PORT} --pairing-address ${CT_IP}"
+else
+  SERVE_CMD="/usr/bin/xvfb-run -a /usr/local/bin/orca serve --port ${APP_PORT} --pairing-address ${CT_IP}"
+fi
+pct push "$CT_ID" /dev/stdin /usr/local/bin/orca-serve <<WRAPPER
+#!/usr/bin/env bash
+# Generiert vom Orca-Proxmox-Installer (Modus: ${ENTRY_MODE}). Nicht manuell aendern.
+set -euo pipefail
+exec ${SERVE_CMD}
+WRAPPER
+pct exec "$CT_ID" -- chmod 755 /usr/local/bin/orca-serve
+
+# systemd-Unit aus diesem Repo übernehmen (fällt auf Inline-Unit zurück).
+# Die Unit ist statisch (ExecStart=/usr/local/bin/orca-serve) – IP/Modus
+# stecken im Wrapper oben.
 if pct exec "$CT_ID" -- curl -fsSL -o /etc/systemd/system/orca.service "$SERVICE_URL" 2>/dev/null; then
   msg_ok "orca.service aus Repo übernommen."
-  pct exec "$CT_ID" -- bash -c "sed -i 's/__CT_IP__/${CT_IP}/g' /etc/systemd/system/orca.service"
-  grep -q "__CT_IP__" <(pct exec "$CT_ID" -- cat /etc/systemd/system/orca.service) \
-    && { msg_error "Platzhalter __CT_IP__ wurde nicht ersetzt."; exit 1; }
 else
   msg_warn "Service-URL nicht erreichbar – schreibe Inline-Unit."
   pct push "$CT_ID" /dev/stdin /etc/systemd/system/orca.service <<UNIT
@@ -302,7 +328,7 @@ User=${APP_USER}
 Group=${APP_USER}
 WorkingDirectory=${DATA_DIR}
 Environment=HOME=${DATA_DIR}
-ExecStart=/usr/local/bin/orca serve --port ${APP_PORT} --pairing-address ${CT_IP}
+ExecStart=/usr/local/bin/orca-serve
 Restart=always
 RestartSec=5
 
@@ -320,19 +346,27 @@ msg_info "Verifiziere Installation ..."
 pct exec "$CT_ID" -- systemctl is-active orca || { msg_error "systemd-Service orca ist nicht active."; pct exec "$CT_ID" -- systemctl status orca --no-pager || true; exit 1; }
 msg_ok "Service läuft (systemctl is-active orca = active)."
 
-# Hinweis: / liefert nicht garantiert HTTP 200 (ggf. 404) – darum zaehlt jeder
-# Status ausser 000 (keine TCP-Verbindung) als "antwortet".
+# Hinweis: /web-index.html ist der Web-Client (belegt: HTTP 200) – primaerer
+# Check. Faellt er anders aus, zaehlt ersatzweise jede Antwort auf / ausser
+# 000 (keine TCP-Verbindung).
 msg_info "Warte auf orca serve (max. 3 Min) ..."
 WEB_OK=0
 PAIR_CODE="000"
+WWW_CODE="000"
 for _ in $(seq 1 18); do
+  WWW_CODE="$(pct exec "$CT_ID" -- curl -s -o /dev/null -w '%{http_code}' -m 10 "http://localhost:${APP_PORT}/web-index.html" 2>/dev/null || echo 000)"
+  if [[ "$WWW_CODE" == "200" ]]; then WEB_OK=1; PAIR_CODE="$WWW_CODE"; break; fi
   PAIR_CODE="$(pct exec "$CT_ID" -- curl -s -o /dev/null -w '%{http_code}' -m 10 "http://localhost:${APP_PORT}/" 2>/dev/null || echo 000)"
   if [[ "$PAIR_CODE" != "000" ]]; then WEB_OK=1; break; fi
   sleep 10
 done
 [[ "$WEB_OK" == "1" ]] \
   || { msg_error "orca serve antwortet nicht auf localhost:${APP_PORT}."; pct exec "$CT_ID" -- systemctl status orca --no-pager || true; pct exec "$CT_ID" -- journalctl -u orca --no-pager -n 100 || true; pct exec "$CT_ID" -- ss -ltn || true; exit 1; }
-msg_ok "orca serve antwortet (HTTP ${PAIR_CODE} auf localhost:${APP_PORT})."
+if [[ "$WWW_CODE" == "200" ]]; then
+  msg_ok "Web-Client antwortet (HTTP 200 auf localhost:${APP_PORT}/web-index.html)."
+else
+  msg_warn "Web-Client unklar (HTTP ${WWW_CODE}), Port antwortet (HTTP ${PAIR_CODE}) – Pairing-URL unten pruefen."
+fi
 
 PAIR_URL="$(pct exec "$CT_ID" -- journalctl -u orca --no-pager -n 200 2>/dev/null | grep -oP 'orca://pair\?[^ ]+' | tail -n1 || true)"
 [[ -n "${PAIR_URL:-}" ]] || PAIR_URL="<siehe journalctl -u orca im Container>"
@@ -344,6 +378,7 @@ echo "  Upstream     : $UPSTREAM_REPO"
 echo "  Container    : CT $CT_ID (Hostname: $HOSTNAME_ARG, unprivilegiert, onboot=1)"
 echo "  Ressourcen   : $CORES vCPU / $RAM MB RAM / $DISK GB Disk"
 echo "  Endpoint     : http://${CT_IP}:${APP_PORT}"
+echo "  Web-Client   : http://${CT_IP}:${APP_PORT}/web-index.html"
 echo "  Pairing      : ${PAIR_URL}"
 echo "  Client-Setup : Laptop-Orca → Settings → Remote Orca Servers → Add Server → Link einfügen"
 echo "  Root-Passwort: ${PASSWORD_ARG:-<bestehender CT, unverändert>} (nur jetzt angezeigt!)"

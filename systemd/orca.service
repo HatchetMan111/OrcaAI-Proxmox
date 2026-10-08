@@ -11,7 +11,9 @@ Group=orca
 WorkingDirectory=/var/lib/orca
 Environment=HOME=/var/lib/orca
 Environment=ORCA_SERVE_PORT=6768
-ExecStart=/usr/local/bin/orca serve --port 6768 --pairing-address __CT_IP__
+# Startet /usr/local/bin/orca-serve (vom Installer generiert: Dispatcher direkt
+# oder xvfb-run + AppRun-Entry, jeweils mit fester Pairing-Adresse).
+ExecStart=/usr/local/bin/orca-serve
 Restart=always
 RestartSec=5
 
