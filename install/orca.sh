@@ -203,4 +203,141 @@ done
 [[ -n "${CT_IP:-}" ]] || { msg_error "Keine Container-IP (pct exec hostname -I). Netzwerk/Bridge prüfen."; exit 1; }
 msg_ok "Container-IP: $CT_IP"
 
-# __CONTAINER_SETUP__
+# ---------------------------------------------------------------------------
+# 4. Orca im Container (via pct exec, idempotent)
+# ---------------------------------------------------------------------------
+msg_info "Installiere Orca (Prebuilt-AppImage, ohne FUSE) im Container ..."
+# Hinweis: aeussere Single-Quotes – der Block laeuft dadurch 1:1 im Container,
+# ohne dass die Host-Shell $ oder $(...) anfasst (kein Escaping noetig).
+# Darum: in diesen Bloecken KEINE einfachen Anfuehrungszeichen verwenden.
+pct exec "$CT_ID" -- bash -c '
+  set -euo pipefail
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y curl ca-certificates git squashfs-tools procps iproute2 \
+    libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
+    libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2 libpango-1.0-0 libcairo2
+  id orca >/dev/null 2>&1 || useradd -m -s /bin/bash orca
+  mkdir -p /opt/orca /var/lib/orca
+  chown orca:orca /opt/orca /var/lib/orca
+'
+if [[ "$SOURCE_BUILD" == "1" ]]; then
+  msg_info "Source-Build-Modus (--source-build): Checkout nach /opt/orca-src ..."
+  pct exec "$CT_ID" -- bash -c '
+    set -euo pipefail
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get install -y nodejs npm git curl ca-certificates
+    npm install -g pnpm
+    if [ ! -d /opt/orca-src/.git ]; then
+      rm -rf /opt/orca-src
+      git clone --depth 1 https://github.com/stablyai/orca /opt/orca-src
+    else
+      git -C /opt/orca-src pull --ff-only
+    fi
+    ln -sf /opt/orca-src/out/cli/index.js /usr/local/bin/orca-src-index || true
+  '
+  msg_warn "Source-Checkout liegt unter /opt/orca-src – Build per pnpm im Container nachholen (30-60 Min)."
+  msg_warn "Fuer orca serve wird weiterhin /usr/local/bin/orca benoetigt – ggf. manuell verlinken."
+else
+  pct exec "$CT_ID" -- bash -c '
+    set -euo pipefail
+    cd /opt/orca
+    TAG="$(curl -fsSL https://api.github.com/repos/stablyai/orca/releases/latest | grep -oP "\"tag_name\":\\s*\"\\K[^\"]+" || true)"
+    if [ -z "$TAG" ]; then
+      URL="$(curl -fsSL -o /dev/null -w "%{url_effective}" https://github.com/stablyai/orca/releases/latest)"
+      TAG="$(basename "$URL")"
+    fi
+    test -n "$TAG"
+    echo "Orca-Release: $TAG"
+    curl -fSL -o orca-linux.AppImage "https://github.com/stablyai/orca/releases/download/${TAG}/orca-linux.AppImage"
+    chmod +x orca-linux.AppImage
+    rm -rf squashfs-root
+    ./orca-linux.AppImage --appimage-extract >/dev/null
+    ls squashfs-root | head -n 30
+    BIN="$(find squashfs-root -maxdepth 3 -type f -name orca | head -n1)"
+    test -n "$BIN"
+    echo "Orca-Binary: $BIN"
+    ln -sf "/opt/orca/${BIN}" /usr/local/bin/orca
+    /usr/local/bin/orca --version || /usr/local/bin/orca status --json || true
+  '
+fi
+# Hinweis: bewusst kein '| tail' hier – mit pipefail wuerde der trap sonst
+# die Pipe statt des gescheiterten pct-Befehls melden. Voll-Output steht im Log.
+
+# Host-seitiger Guard: bricht laut ab, falls kein ausfuehrbares Binary da ist –
+# schuetzt vor Geister-Installation bei geaendertem AppImage-Layout.
+pct exec "$CT_ID" -- test -x /usr/local/bin/orca \
+  || { msg_error "Orca-Binary fehlt: /usr/local/bin/orca nicht ausfuehrbar (AppImage-Layout pruefen)."; pct exec "$CT_ID" -- ls -la /opt/orca/squashfs-root 2>/dev/null || true; exit 1; }
+msg_ok "Orca-Binary ok (/usr/local/bin/orca)."
+
+# systemd-Unit aus diesem Repo übernehmen (fällt auf Inline-Unit zurück)
+if pct exec "$CT_ID" -- curl -fsSL -o /etc/systemd/system/orca.service "$SERVICE_URL" 2>/dev/null; then
+  msg_ok "orca.service aus Repo übernommen."
+  pct exec "$CT_ID" -- bash -c "sed -i 's/__CT_IP__/${CT_IP}/g' /etc/systemd/system/orca.service"
+  grep -q "__CT_IP__" <(pct exec "$CT_ID" -- cat /etc/systemd/system/orca.service) \
+    && { msg_error "Platzhalter __CT_IP__ wurde nicht ersetzt."; exit 1; }
+else
+  msg_warn "Service-URL nicht erreichbar – schreibe Inline-Unit."
+  pct push "$CT_ID" /dev/stdin /etc/systemd/system/orca.service <<UNIT
+[Unit]
+Description=Orca Remote Server (orca serve, headless)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${APP_USER}
+Group=${APP_USER}
+WorkingDirectory=${DATA_DIR}
+Environment=HOME=${DATA_DIR}
+ExecStart=/usr/local/bin/orca serve --port ${APP_PORT} --pairing-address ${CT_IP}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+fi
+pct exec "$CT_ID" -- systemctl daemon-reload
+pct exec "$CT_ID" -- systemctl enable --now orca
+
+# ---------------------------------------------------------------------------
+# 5. Verifikation: Service + orca serve Endpoint
+# ---------------------------------------------------------------------------
+msg_info "Verifiziere Installation ..."
+pct exec "$CT_ID" -- systemctl is-active orca || { msg_error "systemd-Service orca ist nicht active."; pct exec "$CT_ID" -- systemctl status orca --no-pager || true; exit 1; }
+msg_ok "Service läuft (systemctl is-active orca = active)."
+
+# Hinweis: / liefert nicht garantiert HTTP 200 (ggf. 404) – darum zaehlt jeder
+# Status ausser 000 (keine TCP-Verbindung) als "antwortet".
+msg_info "Warte auf orca serve (max. 3 Min) ..."
+WEB_OK=0
+PAIR_CODE="000"
+for _ in $(seq 1 18); do
+  PAIR_CODE="$(pct exec "$CT_ID" -- curl -s -o /dev/null -w '%{http_code}' -m 10 "http://localhost:${APP_PORT}/" 2>/dev/null || echo 000)"
+  if [[ "$PAIR_CODE" != "000" ]]; then WEB_OK=1; break; fi
+  sleep 10
+done
+[[ "$WEB_OK" == "1" ]] \
+  || { msg_error "orca serve antwortet nicht auf localhost:${APP_PORT}."; pct exec "$CT_ID" -- systemctl status orca --no-pager || true; pct exec "$CT_ID" -- journalctl -u orca --no-pager -n 100 || true; pct exec "$CT_ID" -- ss -ltn || true; exit 1; }
+msg_ok "orca serve antwortet (HTTP ${PAIR_CODE} auf localhost:${APP_PORT})."
+
+PAIR_URL="$(pct exec "$CT_ID" -- journalctl -u orca --no-pager -n 200 2>/dev/null | grep -oP 'orca://pair\?[^ ]+' | tail -n1 || true)"
+[[ -n "${PAIR_URL:-}" ]] || PAIR_URL="<siehe journalctl -u orca im Container>"
+
+echo ""
+echo "════════════════ INSTALLATION ERFOLGREICH ════════════════"
+echo "  App          : Orca – ADE Remote Server (orca serve, headless)"
+echo "  Upstream     : $UPSTREAM_REPO"
+echo "  Container    : CT $CT_ID (Hostname: $HOSTNAME_ARG, unprivilegiert, onboot=1)"
+echo "  Ressourcen   : $CORES vCPU / $RAM MB RAM / $DISK GB Disk"
+echo "  Endpoint     : http://${CT_IP}:${APP_PORT}"
+echo "  Pairing      : ${PAIR_URL}"
+echo "  Client-Setup : Laptop-Orca → Settings → Remote Orca Servers → Add Server → Link einfügen"
+echo "  Root-Passwort: ${PASSWORD_ARG:-<bestehender CT, unverändert>} (nur jetzt angezeigt!)"
+echo "  Service      : systemctl status orca  (im Container via: pct enter $CT_ID)"
+echo "  Update       : Skript erneut laufen lassen (idempotent, Release-Refresh + Restart)"
+echo "  Deinstall    : pct stop $CT_ID && pct destroy $CT_ID"
+echo "  Reboot-Test  : pct reboot $CT_ID && sleep 60 && curl -s -o /dev/null -w '%{http_code}' http://${CT_IP}:${APP_PORT}"
+echo "  Log          : $LOG_FILE"
+echo "══════════════════════════════════════════════════════════"
