@@ -35,7 +35,6 @@ UNPRIVILEGED="1"                                  # 1 = unprivilegiert (reicht h
 FEATURES="nesting=1"                              # nesting für AppImage-Extract Robustheit
 
 APP_USER="orca"
-APP_DIR="/opt/orca"
 DATA_DIR="/var/lib/orca"
 
 # Umgebungs-Overrides: CT_ID=150 CORES=2 RAM=4096 DISK=20 ./orca.sh
