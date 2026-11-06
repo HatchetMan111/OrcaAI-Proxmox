@@ -217,6 +217,13 @@ pct exec "$CT_ID" -- bash -c '
     libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 \
     libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2 libpango-1.0-0 libcairo2 \
     libgtk-3-0 libxfixes3 xvfb
+  # GitHub CLI (gh) installieren
+  apt-get install -y curl ca-certificates gnupg
+  curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg
+  chmod +x /usr/share/keyrings/githubcli-archive-keyring.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list
+  apt-get update
+  apt-get install -y gh
   id orca >/dev/null 2>&1 || useradd -m -s /bin/bash orca
   mkdir -p /opt/orca /var/lib/orca
   chown orca:orca /opt/orca /var/lib/orca
