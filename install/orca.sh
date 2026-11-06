@@ -369,7 +369,11 @@ else
 fi
 
 PAIR_URL="$(pct exec "$CT_ID" -- journalctl -u orca --no-pager -n 200 2>/dev/null | grep -oP 'orca://pair\?[^ ]+' | tail -n1 || true)"
-[[ -n "${PAIR_URL:-}" ]] || PAIR_URL="<siehe journalctl -u orca im Container>"
+
+# Wenn Pairing-Code aus Logs nicht extrahiert wurde: Direkter Befehl für User anzeigen
+if [[ -z "${PAIR_URL:-}" ]]; then
+  PAIR_URL="pct exec $CT_ID -- journalctl -u orca --no-pager -n 200 | grep -o 'orca://pair?code=[^ ]'"
+fi
 
 echo ""
 echo "════════════════ INSTALLATION ERFOLGREICH ════════════════"
