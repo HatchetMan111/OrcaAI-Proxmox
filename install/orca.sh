@@ -223,6 +223,15 @@ pct exec "$CT_ID" -- bash -c '
 '
 if [[ "$SOURCE_BUILD" == "1" ]]; then
   msg_info "Source-Build-Modus (--source-build): Checkout nach /opt/orca-src ..."
+  # Git-Autorennidentität sicherstellen (z. B. 'Git-Autorenidentität ist nicht konfiguriert')
+  if ! git config --global user.name >/dev/null 2>&1; then
+    git config --global user.name "OrcaInstaller"
+    msg_info "Git user.name wurde automatisch gesetzt (OrcaInstaller)."
+  fi
+  if ! git config --global user.email >/dev/null 2>&1; then
+    git config --global user.email "orca@proxmox.local"
+    msg_info "Git user.email wurde automatisch gesetzt (orca@proxmox.local)."
+  fi
   pct exec "$CT_ID" -- bash -c '
     set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive
