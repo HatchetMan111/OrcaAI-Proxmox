@@ -372,7 +372,7 @@ PAIR_URL="$(pct exec "$CT_ID" -- journalctl -u orca --no-pager -n 200 2>/dev/nul
 
 # Wenn Pairing-Code aus Logs nicht extrahiert wurde: Direkter Befehl für User anzeigen
 if [[ -z "${PAIR_URL:-}" ]]; then
-  PAIR_URL="pct exec $CT_ID -- journalctl -u orca --no-pager -n 200 | grep -o 'orca://pair?code=[^ ]'"
+  PAIR_URL="pct exec $CT_ID -- journalctl -u orca --no-pager -n 200 | grep -o 'orca://pair?code=[^ ]*'"
 fi
 
 echo ""
